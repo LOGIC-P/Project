@@ -9,6 +9,16 @@ from input_data import Load_data
 from model import QueryModel, Decoder, Hidden_init
 from metric import calc_F1, calc_pairsF1
 
+# 启用 GPU 内存增长，确保能够按需分配内存
+physical_devices = tf.config.list_physical_devices('GPU')
+if physical_devices:
+    try:
+        for gpu in physical_devices:
+            tf.config.experimental.set_memory_growth(gpu, True)
+        print("GPU memory growth enabled.")
+    except RuntimeError as e:
+        print("Error setting GPU memory growth:", e)
+
 loss_object = tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True, reduction='none')
 
 class FlowerClient(fl.client.NumPyClient):
@@ -22,22 +32,17 @@ class FlowerClient(fl.client.NumPyClient):
         self.pretrain_epochs = pretrain_epochs
         self.train_epochs = train_epochs
 
-
         tf.keras.backend.set_floatx('float64')
-
 
         self.data = Load_data(city)
         self.poi_embedding, self.poi_size = self.data.self_embedding()
-
 
         self.query = QueryModel(self.poi_embedding, k)
         self.decoder = Decoder(self.poi_embedding, self.poi_size, dec_units)
         self.h_state = Hidden_init(dec_units)
 
-
         self.train_dataset, self.train_steps = self.data.load_dataset_train(self.batch_size)
         self.test_dataset, self.test_steps = self.data.load_dataset_test(self.batch_size)
-
 
         self.pre_train()
 
@@ -79,7 +84,8 @@ class FlowerClient(fl.client.NumPyClient):
                 batch_loss = self.pre_train_step(pre_que, sample1, sample2)
                 pre_loss_total += batch_loss
                 steps += 1
-            print(f"Pre-training Epoch {epoch+1}: Loss = {pre_loss_total/steps:.4f}, 用时 {time.time()-start_time:.2f} 秒")
+            avg_loss = pre_loss_total / steps
+            print(f"Pre-training Epoch {epoch+1}: Loss = {avg_loss:.4f}, 用时 {time.time()-start_time:.2f} 秒")
         print("=== Pre-training completed ===")
 
     def loss_function(self, real, pred, real2, pred2):
@@ -116,22 +122,22 @@ class FlowerClient(fl.client.NumPyClient):
                 batch_loss = self.train_step(que, traj, lr)
                 total_loss += batch_loss
                 steps += 1
-            print(f"Local training Epoch {epoch+1}: Loss = {total_loss/steps:.4f}, 用时 {time.time()-start_time:.2f} 秒")
+            avg_loss = total_loss / steps
+            print(f"Local training Epoch {epoch+1}: Loss = {avg_loss:.4f}, 用时 {time.time()-start_time:.2f} 秒")
         print("=== Local training completed ===")
+        return avg_loss
 
     def evaluate_model(self, dataset, steps):
         total_f1 = 0.0
         total_pairs_f1 = 0.0
         count = 0
         for batch, (que, traj) in enumerate(dataset.take(steps)):
-
             que1 = tf.expand_dims(que[0], 0)
             traj1 = traj[0]
-
             traj1_np = traj1.numpy()
             traj1_np = traj1_np[traj1_np != 0]
             traj1 = tf.expand_dims(tf.convert_to_tensor(traj1_np), 0)
-            batch_f1, batch_ps_f1, _, _ = self.evaluate(que1, traj1)
+            batch_f1, batch_ps_f1, _, _ = self.evaluate_sample(que1, traj1)
             total_f1 += batch_f1
             total_pairs_f1 += batch_ps_f1
             count += 1
@@ -139,7 +145,10 @@ class FlowerClient(fl.client.NumPyClient):
         pairs_f1_avg = total_pairs_f1 / count if count > 0 else 0.0
         return f1_avg, pairs_f1_avg
 
-    def evaluate(self, que, traj):
+    def evaluate_sample(self, que, traj):
+        """
+        对单个样本进行评估，返回 F1、pair F1 以及真实与预测的轨迹。
+        """
         predict_traj = []
         realnum_poi = 0
         query_out = self.query(que)
@@ -162,7 +171,7 @@ class FlowerClient(fl.client.NumPyClient):
         table[end_poi.numpy()] = 0.
         table[0] = 0.
         for t in range(realnum_poi):
-            self.decoder.set_dropout()
+            self.decoder.set_dropout(0.0)  # 评估时关闭 dropout
             predictions, _, dec_hidden = self.decoder(dec_input, query_out, dec_hidden)
             mask = tf.expand_dims(table, axis=0)
             dec_input = tf.argmax(tf.nn.softmax(predictions * mask), axis=1)
@@ -194,13 +203,22 @@ class FlowerClient(fl.client.NumPyClient):
         self.set_parameters(parameters)
         epochs = config.get("local_epochs", self.train_epochs)
         lr = config.get("lr", 0.1)
-        self.local_train(epochs, lr)
-        return self.get_parameters(), len(self.train_dataset), {}
+        final_loss = self.local_train(epochs, lr)
+        print(f"Client local training finished. Final average loss: {final_loss:.4f}")
+ 
+        global_params = self.get_parameters()
+        param_shapes = [w.shape for w in global_params]
+        print(f"Client model parameter shapes: {param_shapes}")
+        return self.get_parameters(), self.train_steps, {}
 
     def evaluate(self, parameters, config):
         self.set_parameters(parameters)
         f1_avg, pairs_f1_avg = self.evaluate_model(self.test_dataset, self.test_steps)
-        return 0.0, len(self.test_dataset), {"f1": f1_avg, "pair_f1": pairs_f1_avg}
+        print(f"Client evaluation: f1 = {f1_avg:.4f}, pair_f1 = {pairs_f1_avg:.4f}")
+        global_params = self.get_parameters()
+        param_norms = [np.linalg.norm(w) for w in global_params]
+        print(f"Client model parameter norms: {param_norms}")
+        return 0.0, self.test_steps, {"f1": f1_avg, "pair_f1": pairs_f1_avg}
 
 if __name__ == "__main__":
     client = FlowerClient()
