@@ -1,69 +1,33 @@
 import numpy as np
 import tensorflow as tf
-from sklearn.metrics.pairwise import cosine_similarity
-
 
 def calc_F1(traj_act, traj_rec, noloop=False):
-    '''Compute recall, precision and F1 for recommended trajectories'''
-    assert (isinstance(noloop, bool))
-    assert (len(traj_act) > 0)
-    assert (len(traj_rec) > 0)
-    if noloop == True:
-        intersize = len(set(traj_act) & set(traj_rec))
+    assert isinstance(noloop, bool)
+    assert traj_act and traj_rec
+    if noloop:
+        inter = len(set(traj_act)&set(traj_rec))
     else:
-        match_tags = np.zeros(len(traj_act), dtype=np.bool)
+        match = np.zeros(len(traj_act), dtype=bool)
         for poi in traj_rec:
             for j in range(len(traj_act)):
-                if match_tags[j] == False and poi == traj_act[j]:
-                    match_tags[j] = True
+                if not match[j] and poi==traj_act[j]:
+                    match[j]=True
                     break
-        intersize = np.nonzero(match_tags)[0].shape[0]
-    recall = intersize * 1.0 / len(traj_act)
-    precision = intersize * 1.0 / len(traj_rec)
-    Denominator = recall + precision
-    if Denominator == 0:
-        Denominator = 1
-    F1 = 2 * precision * recall * 1.0 / Denominator
-    return F1
-
+        inter = np.count_nonzero(match)
+    rec = inter/len(traj_act)
+    prec= inter/len(traj_rec)
+    return 2*prec*rec/(prec+rec) if (prec+rec)>0 else 0.0
 
 def calc_pairsF1(y, y_hat):
-    assert (len(y) > 0)
-    n = len(y)
-    nr = len(y_hat)
-    n0 = n * (n - 1) / 2
-    n0r = nr * (nr - 1) / 2
-    order_dict = dict()
-    for i in range(n):
-        order_dict[y[i]] = i
-    nc = 0
+    n, nr = len(y), len(y_hat)
+    if n<2 or nr<2: return 0.0
+    order = {v:i for i,v in enumerate(y)}
+    nc=0
     for i in range(nr):
-        poi1 = y_hat[i]
-        for j in range(i + 1, nr):
-            poi2 = y_hat[j]
-            if poi1 in order_dict and poi2 in order_dict and poi1 != poi2:
-                if order_dict[poi1] < order_dict[poi2]:
-                    nc += 1
-    precision = (1.0 * nc) / (1.0 * n0r)
-    recall = (1.0 * nc) / (1.0 * n0)
-    if nc == 0:
-        F1 = 0
-    else:
-        F1 = 2. * precision * recall / (precision + recall)
-    return float(F1)
-
-
-def calc_pairsF12(y, y_hat):
-    f1 = 0
-    for i in range(len(y)):
-         if (y[i] == y_hat[i]):
-             f1 += 1
-    return float(f1) / float(len(y))
-
-
-def calc_similarity(hidden1, hidden2):
-    sim = hidden1 * hidden2
-    sim = tf.reduce_sum(sim, axis=1)
-    denom = np.linalg.norm(hidden1) * np.linalg.norm(hidden2)
-    sim = sim / denom
-    return sim
+        for j in range(i+1,nr):
+            if y_hat[i] in order and y_hat[j] in order and order[y_hat[i]]<order[y_hat[j]]:
+                nc+=1
+    n0 = n*(n-1)/2; n0r = nr*(nr-1)/2
+    prec=nc/n0r if n0r>0 else 0.0
+    rec =nc/n0  if n0>0  else 0.0
+    return 2*prec*rec/(prec+rec) if (prec+rec)>0 else 0.0
