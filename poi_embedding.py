@@ -28,14 +28,17 @@ class Word2Vec(Model):
     target, context = pair
     word_emb0 = self.query_embedding(target[:, 0])
     word_emb1 = self.query_embedding(target[:, 1])
-    word_emb = (word_emb0 + word_emb1) / 2
+    word_emb = (word_emb0 + word_emb1)/2
     context_emb = self.poi_embedding(context)
     dots = self.dots([context_emb, word_emb])
+
     return self.flatten(dots)
 
 
 class PoiEmbedding():
+
     def __init__(self, dis_matric, train_data, poi_num, num_ns=3, walk_num=10, walk_length=6):
+
         self.dis_matric = dis_matric
         self.walk_num = walk_num
         self.walk_length = walk_length
@@ -44,6 +47,7 @@ class PoiEmbedding():
         self.num_ns = num_ns
         self.sentences = []
         self.positive_data = []
+
         self.dataset = None
 
     def gen_sentences(self, start, end):
@@ -54,38 +58,47 @@ class PoiEmbedding():
                 if np.sum(self.poi_graph.loc[poi_now]) != 1:
                     break
                 poi_next = np.random.choice(self.poi_graph.columns, p=self.poi_graph.loc[poi_now])
+
                 if poi_next == end:
                     sentence.append(poi_next)
                     break
                 sentence.append(poi_next)
                 poi_now = poi_next
+
             if (len(sentence) >= 3 and sentence[-1] == end):
                 self.sentences.append(sentence)
 
+
     def gen_train(self):
-        self.poi_graph = pd.DataFrame(np.zeros(self.poi_num**2).reshape(self.poi_num, self.poi_num),
+        self.poi_graph = pd.DataFrame(np.zeros(self.poi_num**2).reshape(self.poi_num,self.poi_num),
                                       index=range(0, self.poi_num),
                                       columns=range(0, self.poi_num))
         for traj in self.train_data:
             for i in range(len(traj)-1):
-                if traj[i+1] == 0:
+                if(traj[i+1] == 0):
                     break
-                self.poi_graph.loc[traj[i], traj[i+1]] += 1
+                self.poi_graph.loc[traj[i],traj[i+1]] += 1
         self.poi_graph = self.poi_graph + self.dis_matric
+
         for i in self.poi_graph.index:
             if np.sum(self.poi_graph.loc[i]) == 0:
                 continue
             self.poi_graph.loc[i] = self.poi_graph.loc[i] / np.sum(self.poi_graph.loc[i])
         print(self.poi_graph)
+
         for start in self.poi_graph.index:
             for end in self.poi_graph.columns:
                 self.gen_sentences(start, end)
+
         print('deepwalk data ', len(self.sentences))
+
         for sentence in self.sentences:
-            target = (sentence[0], sentence[-1])
+            target = (sentence[0],sentence[-1])
             for poi in sentence[1:-1]:
-                self.positive_data.append((target, poi))
-        print('正样本：', len(self.positive_data))
+                self.positive_data.append((target,poi))
+
+        print('Positive sample：',len(self.positive_data))
+
         targets, contexts, labels = [], [], []
         for target_pois, context_poi in self.positive_data:
             context_class = tf.expand_dims(
@@ -98,52 +111,66 @@ class PoiEmbedding():
                 range_max=self.poi_num,
                 seed=40,
                 name="nagetive_sampling")
-            negative_sampling_candidates = tf.expand_dims(negative_sampling_candidates, 1)
+
+            # Build context and label vectors (for one target word)
+            negative_sampling_candidates = tf.expand_dims(
+                negative_sampling_candidates, 1)
+
             context = tf.concat([context_class, negative_sampling_candidates], 0)
             label = tf.constant([1] + [0] * self.num_ns, dtype="int64")
+
+            # Append each element from the training example to global lists.
             targets.append(target_pois)
             contexts.append(context)
             labels.append(label)
-        print(len(targets), len(contexts), len(labels))
+        print(len(targets),len(contexts),len(labels))
+
         BATCH_SIZE = 4
         BUFFER_SIZE = 10000
         self.dataset = tf.data.Dataset.from_tensor_slices(((targets, contexts), labels))
         self.dataset = self.dataset.shuffle(BUFFER_SIZE).batch(BATCH_SIZE, drop_remainder=True)
 
     def train(self, city, em_size):
-        embedding_dim = em_size
+        embedding_dim = em_size   # poi嵌入维度
         word2vec = Word2Vec(self.poi_num, embedding_dim, self.num_ns)
-        word2vec.compile(optimizer=tf.keras.optimizers.Adam(lr=0.001),
+        word2vec.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=0.001),
                          loss=tf.keras.losses.CategoricalCrossentropy(from_logits=True),
                          metrics=['accuracy'])
         tensorboard_callback = tf.keras.callbacks.TensorBoard(log_dir="logs")
         word2vec.fit(self.dataset, epochs=20, callbacks=[tensorboard_callback])
+
         que_weights = word2vec.get_layer('query_em_layer').get_weights()[0]
         poi_weights = word2vec.get_layer('poi_em_layer').get_weights()[0]
         que_weights = pd.DataFrame(que_weights)
         print(que_weights.shape)
         poi_weights = pd.DataFrame(poi_weights)
         print(poi_weights.shape)
-        # que_weights.to_csv('./self-embedding/'+city+'_que_weight.csv', index=False)
-        # poi_weights.to_csv('./self-embedding/'+city+'_poi_weight.csv', index=False)
+        # que_weights.to_csv('./self-embedding/'+city+'_que_weight.csv',index=False)
+        # poi_weights.to_csv('./self-embedding/'+city+'_poi_weight.csv',index=False)
 
 
 if __name__ == '__main__':
+
     city = 'Osak'
     # city = 'Glas'
     # city = 'Edin'
     # city = 'Toro'
-    trajs_data = open('./train_data/' + city + '-trajs.dat', 'r')
+    trajs_data = open('./train_data/'+city+'-trajs.dat','r')
     trajs_list = []
     poi_dis_matric = pd.read_csv('./dis_matric/' + city + '_dis_matric.csv')
+
     for line in trajs_data.readlines():
         tlist = [eval(i) for i in line.split()]
         trajs_list.append(tlist)
     print('total number', len(trajs_list))
+
     poi_size = poi_dis_matric.shape[0]  # poi个数
     print('poi number', poi_size)
+
     poi_dis_matric.index = [i for i in range(0, poi_size)]
     poi_dis_matric.columns = [i for i in range(0, poi_size)]
+
     self_embedding = PoiEmbedding(poi_dis_matric, trajs_list, poi_size)
     self_embedding.gen_train()
     self_embedding.train(city, poi_embedding_size)
+
