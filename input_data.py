@@ -43,7 +43,6 @@ class CityData:
         return [p + self.offset for p in t]
 
     def load_supervised(self, batch=32):
-        """生成增强版的 query 和 trip 配对"""
         queries = []
         trajs = []
 
@@ -76,7 +75,6 @@ class CityData:
 
 
     def gen_contrastive_sequences(self):
-        """增强 POI 图生成更多可学习路径"""
         from contrastive_poi import build_aug_graph, gen_sequences
 
         mat = build_aug_graph(
