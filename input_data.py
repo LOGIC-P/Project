@@ -1,146 +1,95 @@
-#!/usr/bin/python3
-# coding=utf-8
-
-import tensorflow as tf
-import pandas as pd
+# input_data.py
 import numpy as np
-import random
+import pandas as pd
+import tensorflow as tf
 from sklearn.model_selection import train_test_split
-from data_augmentation import DataAugmentation
+from data_augmentation import SeqAugmentor
+from global_config import create_trainable_embedding
 
 
-class Load_data():
+def _normalize_geo(geo):
+    geo = geo.astype(np.float32)
+    np.fill_diagonal(geo, 1e-6)
+    row_sum = geo.sum(axis=1, keepdims=True)
+    row_sum[row_sum == 0] = 1.0
+    return geo / row_sum
+
+
+class CityData:
     def __init__(self, city):
         self.city = city
-        self.data_aug = DataAugmentation(city)
+        self.emb_var, offsets = create_trainable_embedding()
+        self.offset, self.local_n = offsets[city]
+        self.local_mask = np.zeros(self.emb_var.shape[0], dtype=np.float32)
+        self.local_mask[self.offset : self.offset + self.local_n] = 1.0
 
-    def data_size(self):
-        query_list = []
-        query_data = pd.read_csv('./train_data/' + self.city + '-query.csv')
-        for i in query_data.index:
-            query_list.append(query_data.loc[i].tolist())
-        return len(query_list)
+        # load csv
+        qf = f"./train_data/{city}-query.csv"
+        tf_path = f"./train_data/{city}-trajs.dat"
+        self.queries = pd.read_csv(qf).values.tolist()
+        with open(tf_path) as f:
+            self.trajs = [[int(x) for x in l.split()] for l in f]
 
-    def random_embedding(self):
-        poi_list = []
-        poi_data = pd.read_csv('./self-embedding/' + self.city + '_poi_weight.csv')
-        em_size = poi_data.shape[1]
-        for i in poi_data.index:
-            poi_list.append(np.random.randn(em_size).tolist())
-        poi_size = len(poi_list)
-        embedding = tf.constant(poi_list, dtype='float64')
-        return embedding, poi_size
+        geo_raw = pd.read_csv(f"./dis_matric/{city}_dis_matric.csv").values
+        self.geo_prob = _normalize_geo(geo_raw)
 
-    def self_embedding(self):
-        poi_list = []
-        poi_data = pd.read_csv('./self-embedding/' + self.city + '_poi_weight.csv')
-        for i in poi_data.index:
-            poi_list.append(poi_data.loc[i].tolist())
-        poi_size = len(poi_list)
-        embedding = tf.constant(poi_list, dtype='float64')
-        return embedding, poi_size
+    # ---------- supervised ----------
+    def _map_q(self, q):
+        return np.array(
+            [q[0] + self.offset, q[1], q[2] + self.offset, q[3]], dtype=np.int32
+        )
 
-    def load_dataset(self, BATCH_SIZE):
-        query_list = []
-        trajs_list = []
-        query_data = pd.read_csv('./train_data/' + self.city + '-query.csv')
-        trajs_data = open('./train_data/' + self.city + '-trajs.dat', 'r')
-        for i in query_data.index:
-            query_list.append(query_data.loc[i].tolist())
-        for line in trajs_data.readlines():
-            tlist = [eval(i) for i in line.split()]
-            trajs_list.append(tlist)
-        print('total number:', len(query_list), len(trajs_list))
-        trajs_list = tf.keras.preprocessing.sequence.pad_sequences(trajs_list, padding='post')
-        query_train, query_val, trajs_train, trajs_val = train_test_split(query_list, trajs_list, test_size=0.2)
-        print('train_set:', len(query_train), len(trajs_train))
-        print('test_set:', len(query_val), len(trajs_val))
-        dt_train = tf.data.Dataset.from_tensor_slices((query_train, trajs_train)).shuffle(len(query_train))
-        dt_train = dt_train.batch(BATCH_SIZE, drop_remainder=True)
-        dt_val = tf.data.Dataset.from_tensor_slices((query_val, trajs_val)).shuffle(len(query_val))
-        dt_val = dt_val.batch(BATCH_SIZE, drop_remainder=True)
-        return dt_train, dt_val, int(len(query_train) / BATCH_SIZE), int(len(query_val) / BATCH_SIZE)
+    def _map_t(self, t):
+        return [p + self.offset for p in t]
 
-    def load_pretrain_dataset(self, que, traj):
-        pre_que = que
-        r1 = random.randint(1, 4)
-        r2 = random.randint(1, 4)
-        sample1 = self.gen_random_sample(r1, traj)
-        sample2 = self.gen_random_sample(r2, traj)
-        return pre_que, sample1, sample2
+    def load_supervised(self, batch=32):
+        """生成增强版的 query 和 trip 配对"""
+        queries = []
+        trajs = []
 
-    def gen_random_sample(self, rand_num, traj):
-        if rand_num == 0:
-            return tf.nn.embedding_lookup(self.data_aug.original(), traj)
-        if rand_num == 1:
-            return tf.nn.embedding_lookup(self.data_aug.token_cutoff(), traj)
-        if rand_num == 2:
-            trajs = traj.numpy()
-            sample = []
-            for traj in trajs:
-                traj_aug = tf.nn.embedding_lookup(self.data_aug.token_shuffing(traj), traj)
-                sample.append(traj_aug.numpy())
-            return tf.constant(sample, dtype='double')
-        if rand_num == 3:
-            return tf.nn.embedding_lookup(self.data_aug.feature_cutoff(), traj)
-        if rand_num == 4:
-            return tf.nn.embedding_lookup(self.data_aug.dropout(), traj)
+        for traj in self.trajs:
+            if len(traj) < 3:
+                continue
+            start_poi, end_poi = traj[0], traj[-1]
+            n_poi = len(traj)
+            start_time = np.random.randint(0, 24)
+            end_time = (start_time + np.random.randint(1, 5)) % 24
+            queries.append([start_poi + self.offset, start_time, end_poi + self.offset, end_time])
+            trajs.append([p + self.offset for p in traj])
 
-    def load_dataset_one(self, index, BATCH_SIZE):
-        query_list = []
-        trajs_list = []
-        query_data = pd.read_csv('./train_data/' + self.city + '-query.csv')
-        trajs_data = open('./train_data/' + self.city + '-trajs.dat', 'r')
-        for i in query_data.index:
-            query_list.append(query_data.loc[i].tolist())
-        for line in trajs_data.readlines():
-            tlist = [eval(i) for i in line.split()]
-            trajs_list.append(tlist)
-        print('total number：', len(query_list), len(trajs_list))
-        trajs_list = tf.keras.preprocessing.sequence.pad_sequences(trajs_list, padding='post')
-        trajs_list = trajs_list.tolist()
-        query_val = []
-        trajs_val = []
-        query_val.append(query_list.pop(index))
-        trajs_val.append(trajs_list.pop(index))
-        query_train = query_list
-        trajs_train = trajs_list
-        print('train set:', len(query_train), len(trajs_train))
-        print('test set:', len(query_val), len(trajs_val))
-        dt_train = tf.data.Dataset.from_tensor_slices((query_train, trajs_train)).shuffle(len(query_train))
-        dt_train = dt_train.batch(BATCH_SIZE, drop_remainder=True)
-        dt_val = tf.data.Dataset.from_tensor_slices((query_val, trajs_val)).shuffle(len(query_val))
-        dt_val = dt_val.batch(1, drop_remainder=True)
-        return dt_train, dt_val, int(len(query_train) / BATCH_SIZE), 1
+            # 加 trip 增强
+            for _ in range(2):
+                aug1 = SeqAugmentor.mask(traj)
+                aug2 = SeqAugmentor.shuffle(traj)
+                queries.append([start_poi + self.offset, start_time, end_poi + self.offset, end_time])
+                trajs.append([p + self.offset for p in aug1])
+                queries.append([start_poi + self.offset, start_time, end_poi + self.offset, end_time])
+                trajs.append([p + self.offset for p in aug2])
 
-    def load_dataset_train(self, BATCH_SIZE):
-        query_train = []
-        trajs_train = []
-        query_data = pd.read_csv('./train_data/' + self.city + '-query.csv')
-        trajs_data = open('./train_data/' + self.city + '-trajs.dat', 'r')
-        for i in query_data.index:
-            query_train.append(query_data.loc[i].tolist())
-        for line in trajs_data.readlines():
-            tlist = [eval(i) for i in line.split()]
-            trajs_train.append(tlist)
-        print('Total training set：', len(query_train), len(trajs_train))
-        trajs_train = tf.keras.preprocessing.sequence.pad_sequences(trajs_train, padding='post')
-        dt_train = tf.data.Dataset.from_tensor_slices((query_train, trajs_train)).shuffle(len(query_train))
-        dt_train = dt_train.batch(BATCH_SIZE, drop_remainder=True)
-        return dt_train, int(len(query_train) / BATCH_SIZE)
+        Q = np.array(queries, dtype=np.int32)
+        T = tf.keras.preprocessing.sequence.pad_sequences(trajs, padding="post")
+        q_tr, q_val, t_tr, t_val = train_test_split(Q, T, test_size=0.2, random_state=42)
 
-    def load_dataset_test(self, BATCH_SIZE):
-        query_test = []
-        trajs_test = []
-        query_data = pd.read_csv('./train_data/' + self.city + '-query.csv')
-        trajs_data = open('./train_data/' + self.city + '-trajs.dat', 'r')
-        for i in query_data.index:
-            query_test.append(query_data.loc[i].tolist())
-        for line in trajs_data.readlines():
-            tlist = [eval(i) for i in line.split()]
-            trajs_test.append(tlist)
-        print('train set number:', len(query_test), len(trajs_test))
-        trajs_test = tf.keras.preprocessing.sequence.pad_sequences(trajs_test, padding='post')
-        dt_test = tf.data.Dataset.from_tensor_slices((query_test, trajs_test)).shuffle(len(query_test))
-        dt_test = dt_test.batch(BATCH_SIZE, drop_remainder=True)
-        return dt_test, int(len(query_test) / BATCH_SIZE)
+        tr = tf.data.Dataset.from_tensor_slices((q_tr, t_tr)).shuffle(len(q_tr)).batch(batch).prefetch(tf.data.AUTOTUNE)
+        va = tf.data.Dataset.from_tensor_slices((q_val, t_val)).batch(batch)
+        return tr, va
+
+
+    def gen_contrastive_sequences(self):
+        """增强 POI 图生成更多可学习路径"""
+        from contrastive_poi import build_aug_graph, gen_sequences
+
+        mat = build_aug_graph(
+            self.trajs,
+            list(range(self.local_n)),
+            self.geo_prob,
+        )
+        seqs = gen_sequences(mat, walk_num=5, walk_len=6)
+        return [[x + self.offset for x in s] for s in seqs]
+
+    # ---------- trip-level aug ----------
+    def aug_two_views(self, traj):
+        a, b = np.random.choice(
+            [SeqAugmentor.mask, SeqAugmentor.shuffle, SeqAugmentor.cutoff], 2
+        )
+        return a(traj), b(traj)
