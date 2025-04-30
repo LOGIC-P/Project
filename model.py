@@ -1,87 +1,43 @@
-#!/usr/bin/python3
-# coding=utf-8
-
+# model.py
 import tensorflow as tf
-from tensorflow.keras import Model, layers
-
-# ----------------------------------- Hidden_init ---------------------------------------
-class Hidden_init(Model):
-    def __init__(self, hidden_size):
-        super(Hidden_init, self).__init__()
-        self.hidden_size = hidden_size
-        self.fc = layers.Dense(self.hidden_size, name='hidden_init')
-
-    def call(self, input_que):
-        hidden_state = tf.nn.relu(self.fc(input_que))
-        return hidden_state
-
-    def reset_variable(self):
-        self.fc = layers.Dense(self.hidden_size, name='hidden_init')
+from tensorflow.keras import layers
 
 
-# ----------------------------------- QueryModel ---------------------------------------
-class QueryModel(Model):
-    def __init__(self, poi_embedding, K_dim):
-        super(QueryModel, self).__init__()
-        self.K_dim = K_dim
-        self.poi_dim = poi_embedding.shape[1] + 24
-        self.w = tf.Variable(tf.random.normal([2 * self.poi_dim, self.K_dim], mean=0, stddev=1, dtype='float64'))
-        self.b = tf.Variable(tf.random.normal([self.K_dim], mean=0, stddev=1, dtype='float64'))
-        self.K = tf.Variable(tf.random.normal([self.poi_dim, self.poi_dim, self.K_dim], mean=0, stddev=1, dtype='float64'))
-        self.poi_embedding = poi_embedding
-        self.time_embdding = tf.one_hot([i for i in range(24)], 24, dtype='float64')
+class QueryEncoder(tf.keras.Model):
+    def __init__(self, emb_var, k_dim=256):
+        super().__init__()
+        self.emb = emb_var
+        self.t_emb = tf.eye(24, dtype=tf.float32)
+        poi_dim = emb_var.shape[1]
+        self.fc = layers.Dense(k_dim)
 
-    def call(self, query_batch, training=None, mask=None):
-        start_poi = tf.nn.embedding_lookup(self.poi_embedding, query_batch[:, 0])
-        end_poi = tf.nn.embedding_lookup(self.poi_embedding, query_batch[:, 2])
-        start_time = tf.nn.embedding_lookup(self.time_embdding, query_batch[:, 1])
-        end_time = tf.nn.embedding_lookup(self.time_embdding, query_batch[:, 3])
-        start_poi = tf.concat([start_poi, start_time], 1)
-        end_poi = tf.concat([end_poi, end_time], 1)
-        X = tf.concat([start_poi, end_poi], 1)
-        out = tf.matmul(X, self.w) + self.b + tf.matmul(end_poi, tf.reduce_sum(tf.matmul(start_poi, self.K), 1))
-        return tf.nn.leaky_relu(out)
-
-    def reset_variable(self):
-        self.w = tf.Variable(tf.random.normal([2 * self.poi_dim, self.K_dim], mean=0, stddev=1, dtype='float64'))
-        self.b = tf.Variable(tf.random.normal([self.K_dim], mean=0, stddev=1, dtype='float64'))
-        self.K = tf.Variable(tf.random.normal([self.poi_dim, self.poi_dim, self.K_dim], mean=0, stddev=1, dtype='float64'))
+    def call(self, q):
+        s_poi = tf.nn.embedding_lookup(self.emb, q[:, 0])
+        e_poi = tf.nn.embedding_lookup(self.emb, q[:, 2])
+        s_t = tf.nn.embedding_lookup(self.t_emb, q[:, 1])
+        e_t = tf.nn.embedding_lookup(self.t_emb, q[:, 3])
+        x = tf.concat([s_poi, s_t, e_poi, e_t], 1)
+        return tf.nn.leaky_relu(self.fc(x))
 
 
-# ----------------------------------- Decoder ---------------------------------------
-class Decoder(Model):
-    def __init__(self, poi_embedding, poi_size, dec_units):
-        super(Decoder, self).__init__()
-        self.dec_units = dec_units
+class Decoder(tf.keras.Model):
+    def __init__(self, emb_var, poi_size, local_mask, dec_units=256):
+        super().__init__()
+        self.emb = emb_var
         self.poi_size = poi_size
-        self.dr = 0.5
-        self.embedding = poi_embedding
-        self.gru = layers.GRUCell(self.dec_units, dropout=self.dr)
-        self.fc = layers.Dense(poi_size)
-        self.fc2 = layers.Dense(poi_size)
-        self.fc_0 = layers.Dense(tf.shape(self.embedding)[0])
 
-    def call(self, x, query, dec_hidden):
-        x1 = tf.nn.embedding_lookup(self.embedding, x)
-        query = self.fc_0(query)
-        x1 = tf.concat([x1, query], 1)
-        output, state = self.gru(x1, dec_hidden)
-        output2 = output
-        x1 = self.fc(output)
-        x2 = self.fc2(output2)
-        return x1, x2, state
+        if isinstance(local_mask, tf.Tensor):
+                    self.local_mask = tf.reshape(local_mask, (1, -1))
+        else:  # NumPy array
+                    self.local_mask = tf.constant(local_mask.reshape(1, -1), dtype=tf.float32)
 
-    def pre_train(self, x, query, dec_hidden):
-        query = self.fc_0(query)
-        x = tf.concat([x, query], 1)
-        output, state = self.gru(x, dec_hidden)
-        return output, state
+        self.gru = layers.GRUCell(dec_units)
+        self.fc_seq = layers.Dense(poi_size)
+        self.fc_dst = layers.Dense(poi_size)
 
-    def reset_variable(self):
-        self.gru = layers.GRUCell(self.dec_units)
-        self.fc = layers.Dense(self.poi_size)
-        self.fc2 = layers.Dense(self.poi_size)
-        self.fc_0 = layers.Dense(tf.shape(self.embedding)[0])
-
-    def set_dropout(self):
-        self.dr = 1.0
+    def call(self, x_id, qv, h):
+        xe = tf.squeeze(tf.nn.embedding_lookup(self.emb, x_id), 1)
+        out, h2 = self.gru(tf.concat([xe, qv], 1), h)
+        seq_log = self.fc_seq(out) - 1e9 * (1 - self.local_mask)
+        dst_log = self.fc_dst(out) - 1e9 * (1 - self.local_mask)
+        return seq_log, dst_log, h2
