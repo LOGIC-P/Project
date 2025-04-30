@@ -3,7 +3,6 @@ import os, argparse, warnings
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
 warnings.filterwarnings("ignore")
 
-# 如果你想彻底屏蔽掉 server 端的 loss 输出，可以启用下面这一行：
 import logging
 logging.getLogger("flwr.server").setLevel(logging.WARNING)
 
@@ -99,11 +98,11 @@ class Client(fl.client.NumPyClient):
                 n0 = len(real) * (len(real) - 1) / 2
                 n0r = len(pred) * (len(pred) - 1) / 2
                 pf1s.append(0 if n0 == 0 or n0r == 0 else 2 * nc / (n0 + n0r))
-        # 取平均 F1 和 Pairs-F1
+
         mean_f1 = float(np.mean(f1s)) if f1s else 0.0
         mean_pf1 = float(np.mean(pf1s)) if pf1s else 0.0
 
-        # 这里把 loss 位置改成返回 mean_f1，这样 server 日志里的 “loss” 列就是真实的 F1，不再是 0
+
         return mean_f1, len(f1s), {"f1": mean_f1, "pairs_f1": mean_pf1}
 
 
